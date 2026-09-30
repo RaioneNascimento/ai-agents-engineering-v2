@@ -70,18 +70,15 @@ FERRAMENTAS = [
 ]
 
 
-# --------------------------------------------------------------------------
-# TODO 3 — o critério de parada
-#
-# Sem ele, um agente confuso fica em loop gastando dinheiro. Decida quantos
-# passos (chamadas ao modelo) o agente pode dar por pergunta e implemente
-# deve_parar. Guarde esse número: ele vai para o ADR da equipe.
-# --------------------------------------------------------------------------
-MAX_PASSOS = None  # ex.: 6
+# Critério de parada: no máximo 6 chamadas ao modelo por pergunta.
+# O caminho mais longo que o exercício pede é buscar em dois temas e responder
+# (3 passos). Seis deixa uma folga para uma busca no tema errado e uma correção,
+# e corta o loop antes de um agente confuso gastar sem parar.
+MAX_PASSOS = 6
 
 
 def deve_parar(passos: int) -> bool:
-    raise NotImplementedError("TODO 3: defina MAX_PASSOS e implemente deve_parar em arquitetura_c.py")
+    return passos >= MAX_PASSOS
 
 
 def executar(chamada: modelo.Chamada) -> str:
@@ -103,19 +100,16 @@ def resolver(pergunta: str) -> Resultado:
             # O modelo escreveu texto em vez de usar uma ferramenta.
             return Resultado.de_json(resposta.texto)
 
-        # ------------------------------------------------------------------
-        # TODO 4 — o corpo do loop
-        #
-        # Percorra resposta.chamadas. Cada chamada tem .nome e .args (um dict).
-        #   - "responder"        ──► return Resultado.de_dict(chamada.args)
-        #   - "escalar_para_rh"  ──► return Resultado("escalar", [], chamada.args.get("motivo", ""))
-        #   - qualquer outra     ──► texto = executar(chamada); guarde o par (chamada, texto)
-        #
-        # Depois de percorrer todas, devolva ao modelo o que aconteceu:
-        #   mensagens.append(modelo.mensagem_do_assistente(resposta))
-        #   mensagens.append(modelo.mensagem_de_resultados(pares))
-        # ------------------------------------------------------------------
-        raise NotImplementedError("TODO 4: escreva o corpo do loop em arquitetura_c.py")
+        pares = []
+        for chamada in resposta.chamadas:
+            if chamada.nome == "responder":
+                return Resultado.de_dict(chamada.args)
+            if chamada.nome == "escalar_para_rh":
+                return Resultado("escalar", [], chamada.args.get("motivo", ""))
+            pares.append((chamada, executar(chamada)))
+
+        mensagens.append(modelo.mensagem_do_assistente(resposta))
+        mensagens.append(modelo.mensagem_de_resultados(pares))
 
     # Acabaram os passos sem resposta: sair escalando também é um desfecho projetado.
     return Resultado("escalar", [], f"Não consegui concluir em {passos} passos. Encaminhado ao RH.")
