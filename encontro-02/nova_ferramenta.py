@@ -81,17 +81,107 @@ def normalizar(texto: str) -> str:
 #   3. filtrar (normalizar() ajuda)
 #   4. devolver {"resultados": [...], ...}
 # ======================================================================
-def consultar_rede_credenciada(cidade: str) -> dict:
-    raise NotImplementedError("TODO 4a: implemente consultar_rede_credenciada em nova_ferramenta.py")
+TIPOS = {
+    "hospital": "hospital",
+    "laboratorio": "laboratorio",
+    "clinica": "clinica",
+    "pronto_socorro": "pronto-socorro",
+}
+LIMITE = 5
+
+
+def _linhas() -> list[dict]:
+    valores = SHEETS.ler(PLANILHA_ID, ABA)["values"]
+    cabecalho, linhas = valores[0], valores[1:]
+    return [{coluna: (linha[i] if i < len(linha) else "") for i, coluna in enumerate(cabecalho)}
+            for linha in linhas]
+
+
+def _radicais(texto: str) -> set:
+    """'exames de sangue' e 'exame de sangue' compartilham o começo de cada palavra."""
+    return {palavra[:5] for palavra in normalizar(texto).replace(";", " ").split() if len(palavra) > 2}
+
+
+def _especialidade_bate(pedido: str, especialidades: str) -> bool:
+    alvo = _radicais(pedido)
+    return not alvo or alvo <= _radicais(especialidades)
+
+
+def consultar_rede_credenciada(cidade: str, tipo: str = "", especialidade: str = "",
+                               atende_24h: bool | None = None) -> dict:
+    """Busca prestadores ativos na planilha da rede credenciada."""
+    if not str(cidade).strip():
+        raise ErroDeFerramenta("cidade_vazia", "Informe a cidade.",
+                               como_corrigir="repita a chamada com o nome da cidade")
+    if tipo and tipo not in TIPOS:
+        raise ErroDeFerramenta("tipo_invalido", "'tipo' não é um valor aceito.",
+                               recebido=tipo, aceitos=list(TIPOS),
+                               como_corrigir="repita com tipo igual a um dos valores aceitos")
+
+    cidade_alvo = normalizar(cidade)
+    tipo_alvo = TIPOS.get(tipo, "")
+    encontrados = []
+    for linha in _linhas():
+        if normalizar(linha.get("situacao", "")) != "ativo":
+            continue
+        if normalizar(linha.get("cidade", "")) != cidade_alvo:
+            continue
+        if tipo_alvo and normalizar(linha.get("tipo", "")) != tipo_alvo:
+            continue
+        if especialidade and not _especialidade_bate(especialidade, linha.get("especialidades", "")):
+            continue
+        if atende_24h is not None and (normalizar(linha.get("atende_24h", "")) == "sim") != atende_24h:
+            continue
+        encontrados.append({"id": PLANILHA_ID, **linha})
+
+    aviso = ("Encerre chamando a ferramenta responder, não em texto solto. "
+             "Em fontes, cite exatamente planilha-rede-credenciada. "
+             "Na resposta, indique só prestadores desta lista.")
+    if len(encontrados) > LIMITE:
+        aviso = (f"Há {len(encontrados)} prestadores ativos. Voltaram os {LIMITE} primeiros. "
+                 "Refine com tipo, especialidade ou atende_24h. " + aviso)
+        encontrados = encontrados[:LIMITE]
+    elif not encontrados:
+        aviso = "Nenhum prestador ativo encontrado para essa busca. " + aviso
+
+    return {"id": PLANILHA_ID, "resultados": encontrados, "aviso": aviso}
 
 
 # ======================================================================
 # TODO 4b — o contrato (mesmo formato de contratos.py)
 # ======================================================================
 CONTRATO = {
-    "descricao": "TODO 4",
-    "parametros": None,
-    "saida": None,
+    "descricao": (
+        "Consulta a planilha da rede credenciada do plano de saúde da Aurora: hospital, "
+        "laboratório, clínica e pronto-socorro que atendem pelo plano numa cidade. "
+        "Devolve só prestadores ativos (descredenciado e em negociação não aparecem), "
+        "no máximo 5, com o id planilha-rede-credenciada. "
+        "Depois do resultado, encerre com a ferramenta responder e coloque esse id em fontes. "
+        "Não escreva a resposta final em texto solto. "
+        "A cidade é comparada sem diferenciar maiúsculas, acento ou espaço. "
+        "Use atende_24h true quando a pessoa precisa de atendimento 24 horas. "
+        "Use tipo e especialidade para não devolver a cidade inteira. "
+        "Não use para valor, prazo ou como pedir o benefício (consultar_regra_beneficio), "
+        "nem para saber se um colaborador tem direito ao plano (verificar_elegibilidade_beneficio). "
+        "Não use para políticas de RH nem para dúvidas de TI."
+    ),
+    "parametros": {
+        "type": "object",
+        "properties": {
+            "cidade": {"type": "string", "maxLength": 80,
+                       "description": "A cidade do atendimento, como o colaborador falou. Ex.: 'Campinas'."},
+            "tipo": {"type": "string", "enum": ["hospital", "laboratorio", "clinica", "pronto_socorro"],
+                     "description": "O tipo de prestador. Omita para buscar todos os tipos ativos na cidade."},
+            "especialidade": {"type": "string", "maxLength": 120,
+                              "description": "O que a pessoa precisa. Ex.: 'exame de sangue', 'cardiologia'."},
+            "atende_24h": {"type": "boolean",
+                           "description": "true quando o atendimento precisa funcionar 24 horas."},
+        },
+        "required": ["cidade"],
+        "additionalProperties": False,
+    },
+    "saida": ["id", "prestador", "tipo", "especialidades", "cidade", "bairro", "telefone",
+              "atende_24h", "situacao", "aviso"],
 }
 
 
