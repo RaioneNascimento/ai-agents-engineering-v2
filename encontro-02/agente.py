@@ -8,7 +8,7 @@ import importlib.util
 from pathlib import Path
 
 from camada import como_ferramentas, executar
-from comum import modelo
+from comum import modelo, rastreio
 from comum.resultado import Resultado
 
 # As mesmas regras de resposta do Encontro 1, lidas do arquivo de lá.
@@ -57,6 +57,17 @@ ENCERRAMENTO = [
 
 
 def resolver(pergunta: str, contratos: dict, registro: list) -> Resultado:
+    with rastreio.observacao(
+        "agent", "atender-com-ferramentas", pergunta,
+        trace_name="atender-colaborador", tags=["atendimento", "ferramentas"],
+    ):
+        with rastreio.nome_geracao("decidir-proximo-passo"):
+            resultado = _resolver(pergunta, contratos, registro)
+        rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+        return resultado
+
+
+def _resolver(pergunta: str, contratos: dict, registro: list) -> Resultado:
     ferramentas = como_ferramentas(contratos) + ENCERRAMENTO
     mensagens = [modelo.mensagem_do_usuario(pergunta)]
 
@@ -68,9 +79,13 @@ def resolver(pergunta: str, contratos: dict, registro: list) -> Resultado:
         pares = []
         for chamada in resposta.chamadas:
             if chamada.nome == "responder":
-                return Resultado.de_dict(chamada.args)
+                resultado = Resultado.de_dict(chamada.args)
+                rastreio.registrar_ferramenta("responder", chamada.args, rastreio.saida_de_resultado(resultado))
+                return resultado
             if chamada.nome == "escalar_para_rh":
-                return Resultado("escalar", [], chamada.args.get("motivo", ""))
+                resultado = Resultado("escalar", [], chamada.args.get("motivo", ""))
+                rastreio.registrar_ferramenta("escalar-para-rh", chamada.args, rastreio.saida_de_resultado(resultado))
+                return resultado
             pares.append((chamada, executar(chamada.nome, chamada.args, contratos, registro)))
 
         mensagens.append(modelo.mensagem_do_assistente(resposta))

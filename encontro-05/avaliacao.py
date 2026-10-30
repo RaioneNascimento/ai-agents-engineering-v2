@@ -54,7 +54,7 @@ if not (E4 / "busca.py").exists() or not (E4 / "multiagente.py").exists():
 
 import busca                                   # noqa: E402  (encontro-04/busca.py: a busca do Encontro 3, já indexada)
 import multiagente as ma                       # noqa: E402  (o agente da Aula 4)
-from comum import medidor, modelo              # noqa: E402
+from comum import medidor, modelo, rastreio              # noqa: E402
 from comum.resultado import Resultado          # noqa: E402
 
 DADOS = PASTA / "dados"
@@ -454,17 +454,25 @@ def julgar(rodada: dict, juiz: str = "evidencia", mostrar: bool = False) -> dict
                 l[f"juiz_{juiz}"] = {"aprovado": False, "justificativa": "saída fora do contrato", "custo_usd": 0.0}
                 continue
             medicao = medidor.zerar()
-            r = modelo.chamar([modelo.mensagem_do_usuario(_entrada_do_juiz(l, juiz))], sistema=sistema,
-                              ferramentas=[ferramenta], max_tokens=400, exigir_ferramenta="veredito")
-            args = r.chamadas[0].args if r.chamadas else {}
-            if juiz == "ingenuo":
-                nota = int(args.get("nota", 0) or 0)
-                v = {"aprovado": nota >= 4, "nota": nota}
-            else:
-                crit = {k: bool(args.get(k)) for k in ("fiel", "responde", "desfecho_adequado")}
-                v = {"aprovado": all(crit.values()), **crit}
-            v["justificativa"] = str(args.get("justificativa", ""))
-            v["custo_usd"] = medicao.custo_usd
+            with rastreio.observacao(
+                "evaluator", "julgar-resposta",
+                {"pergunta": l["pergunta"], "resposta": l["resposta"], "desfecho": l["desfecho"]},
+                trace_name="julgar-resposta", tags=["avaliacao", f"juiz-{juiz}"],
+            ):
+                with rastreio.nome_geracao("gerar-veredito"):
+                    r = modelo.chamar([modelo.mensagem_do_usuario(_entrada_do_juiz(l, juiz))], sistema=sistema,
+                                      ferramentas=[ferramenta], max_tokens=400, exigir_ferramenta="veredito")
+                args = r.chamadas[0].args if r.chamadas else {}
+                if juiz == "ingenuo":
+                    nota = int(args.get("nota", 0) or 0)
+                    v = {"aprovado": nota >= 4, "nota": nota}
+                else:
+                    crit = {k: bool(args.get(k)) for k in ("fiel", "responde", "desfecho_adequado")}
+                    v = {"aprovado": all(crit.values()), **crit}
+                v["justificativa"] = str(args.get("justificativa", ""))
+                v["custo_usd"] = medicao.custo_usd
+                rastreio.registrar_ferramenta("veredito", args, {k: v[k] for k in v if k != "custo_usd"})
+                rastreio.definir_saida({k: v[k] for k in v if k != "custo_usd"})
             custo += medicao.custo_usd
             l[f"juiz_{juiz}"] = v
             if mostrar:

@@ -146,28 +146,42 @@ def _tem_sensivel(dado) -> bool:
 
 def executar(nome: str, args: dict, contratos: dict, registro: list) -> str:
     """Executa um pedido do modelo e devolve o texto que volta para ele."""
-    entrada = {"ferramenta": nome, "contexto": CONTEXTO.get(nome, "?"), "args": args,
-               "status": "ok", "erro": "", "sensivel": False, "caracteres": 0}
-    try:
-        if nome not in contratos:
-            raise _erro("ferramenta_desconhecida", f"Não existe ferramenta '{nome}'.",
-                        aceitos=list(contratos), recuperavel=True)
-        contrato = contratos[nome]
-        validar(args, contrato["parametros"])
-        bruto = IMPLEMENTACOES[nome](**args)
-        saida = _projetar(bruto, contrato["saida"])
-        if isinstance(saida.get("resultados"), list) and not saida["resultados"]:
-            saida = {**saida, "aviso": saida.get("aviso") or "Nenhum resultado encontrado para essa busca."}
-        entrada["sensivel"] = _tem_sensivel(saida)
-        texto = json.dumps(saida, ensure_ascii=False)
-    except ErroDeFerramenta as e:
-        entrada["status"] = "erro_sistema" if e.tipo == "sistema" else "erro_argumento"
-        entrada["erro"] = e.codigo
-        texto = json.dumps(e.como_dict(), ensure_ascii=False)
-    except TypeError as e:  # argumento que a implementação não aceita
-        entrada["status"], entrada["erro"] = "erro_argumento", "argumento_invalido"
-        texto = json.dumps({"erro": "argumento_invalido", "mensagem": str(e), "recuperavel": True},
-                           ensure_ascii=False)
-    entrada["caracteres"] = len(texto)
-    registro.append(entrada)
-    return texto
+    from comum import rastreio
+
+    # Busca só lê; o resto age. O nome é o do contrato, estável, para o filtro do Langfuse.
+    tipo = "retriever" if nome.startswith(("buscar", "consultar")) else "tool"
+    with rastreio.ferramenta(rastreio.slug(nome), args, tipo=tipo) as obs:
+        entrada = {"ferramenta": nome, "contexto": CONTEXTO.get(nome, "?"), "args": args,
+                   "status": "ok", "erro": "", "sensivel": False, "caracteres": 0}
+        try:
+            if nome not in contratos:
+                raise _erro("ferramenta_desconhecida", f"Não existe ferramenta '{nome}'.",
+                            aceitos=list(contratos), recuperavel=True)
+            contrato = contratos[nome]
+            validar(args, contrato["parametros"])
+            bruto = IMPLEMENTACOES[nome](**args)
+            saida = _projetar(bruto, contrato["saida"])
+            if isinstance(saida.get("resultados"), list) and not saida["resultados"]:
+                saida = {**saida, "aviso": saida.get("aviso") or "Nenhum resultado encontrado para essa busca."}
+            entrada["sensivel"] = _tem_sensivel(saida)
+            texto = json.dumps(saida, ensure_ascii=False)
+        except ErroDeFerramenta as e:
+            entrada["status"] = "erro_sistema" if e.tipo == "sistema" else "erro_argumento"
+            entrada["erro"] = e.codigo
+            texto = json.dumps(e.como_dict(), ensure_ascii=False)
+        except TypeError as e:  # argumento que a implementação não aceita
+            entrada["status"], entrada["erro"] = "erro_argumento", "argumento_invalido"
+            texto = json.dumps({"erro": "argumento_invalido", "mensagem": str(e), "recuperavel": True},
+                               ensure_ascii=False)
+        entrada["caracteres"] = len(texto)
+        registro.append(entrada)
+        if obs is not None:
+            corpo, meta = rastreio.ler_saida(texto)
+            meta.update(contexto=entrada["contexto"], status=entrada["status"])
+            if entrada["sensivel"]:
+                meta["sensivel"] = True
+            if entrada["erro"]:
+                obs.update(output=corpo, metadata=meta, level="ERROR", status_message=entrada["erro"])
+            else:
+                obs.update(output=corpo, metadata=meta)
+        return texto

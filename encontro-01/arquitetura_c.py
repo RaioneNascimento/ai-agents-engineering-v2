@@ -12,7 +12,7 @@ buscar (em qual tema, quantas vezes), escalar ou responder.
 Quem decide o próximo passo é o MODELO, em tempo de execução.
 É o loop do slide "Todo agente é, no fundo, um loop".
 """
-from comum import modelo
+from comum import modelo, rastreio
 from comum.resultado import Resultado
 from ferramentas import buscar_formatado
 from politica_de_resposta import REGRAS
@@ -84,11 +84,27 @@ def deve_parar(passos: int) -> bool:
 def executar(chamada: modelo.Chamada) -> str:
     """Executa uma ferramenta que não encerra o atendimento e devolve o resultado em texto."""
     if chamada.nome == "buscar":
-        return buscar_formatado(chamada.args.get("tema", "todos"), chamada.args.get("consulta", ""))
+        entrada = {"tema": chamada.args.get("tema", "todos"), "consulta": chamada.args.get("consulta", "")}
+        with rastreio.ferramenta("buscar-documentos", entrada, tipo="retriever") as obs:
+            texto = buscar_formatado(entrada["tema"], entrada["consulta"])
+            if obs is not None:
+                obs.update(output=texto, metadata={"fonte": "corpus-local"})
+            return texto
     return f"Ferramenta desconhecida: {chamada.nome}"
 
 
 def resolver(pergunta: str) -> Resultado:
+    with rastreio.observacao(
+        "agent", "atender-agente-loop", pergunta,
+        trace_name="atender-colaborador", tags=["atendimento", "agente-loop"],
+    ):
+        with rastreio.nome_geracao("decidir-proximo-passo"):
+            resultado = _resolver(pergunta)
+        rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+        return resultado
+
+
+def _resolver(pergunta: str) -> Resultado:
     mensagens = [modelo.mensagem_do_usuario(pergunta)]
     passos = 0
 
@@ -103,9 +119,13 @@ def resolver(pergunta: str) -> Resultado:
         pares = []
         for chamada in resposta.chamadas:
             if chamada.nome == "responder":
-                return Resultado.de_dict(chamada.args)
+                resultado = Resultado.de_dict(chamada.args)
+                rastreio.registrar_ferramenta("responder", chamada.args, rastreio.saida_de_resultado(resultado))
+                return resultado
             if chamada.nome == "escalar_para_rh":
-                return Resultado("escalar", [], chamada.args.get("motivo", ""))
+                resultado = Resultado("escalar", [], chamada.args.get("motivo", ""))
+                rastreio.registrar_ferramenta("escalar-para-rh", chamada.args, rastreio.saida_de_resultado(resultado))
+                return resultado
             pares.append((chamada, executar(chamada)))
 
         mensagens.append(modelo.mensagem_do_assistente(resposta))

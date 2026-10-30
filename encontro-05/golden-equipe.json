@@ -1,0 +1,111 @@
+[
+ {
+  "id": "B16",
+  "categoria": "do grupo",
+  "pergunta": "Qual o valor do auxílio-creche?",
+  "esperado": {
+   "desfecho": "responder",
+   "fontes_obrigatorias": [
+    "beneficios-auxilio-creche"
+   ]
+  },
+  "resposta_contem_algum": [
+   "600"
+  ]
+ },
+ {
+  "id": "B03",
+  "categoria": "do grupo",
+  "pergunta": "Voltei de viagem ontem. Até quando preciso lançar as despesas?",
+  "esperado": {
+   "desfecho": "responder",
+   "fontes_obrigatorias": [
+    "fin-viagens-e-reembolso"
+   ]
+  },
+  "resposta_contem_algum": [
+   "10 dias corridos",
+   "dez dias corridos"
+  ],
+  "resposta_nao_contem": [
+   "10 dias úteis",
+   "5 dias úteis"
+  ]
+ },
+ {
+  "id": "B04",
+  "categoria": "do grupo",
+  "pergunta": "Qual a diária máxima de hotel numa viagem para uma capital?",
+  "esperado": {
+   "desfecho": "responder",
+   "fontes_obrigatorias": [
+    "fin-viagens-e-reembolso"
+   ]
+  },
+  "resposta_contem_algum": [
+   "450"
+  ],
+  "resposta_nao_contem": [
+   "320"
+  ]
+ },
+ {
+  "id": "B07",
+  "categoria": "do grupo",
+  "pergunta": "Em quanto tempo preciso compensar as horas do banco de horas?",
+  "esperado": {
+   "desfecho": "responder",
+   "fontes_obrigatorias": [
+    "rh-jornada-e-banco-de-horas"
+   ]
+  },
+  "resposta_contem_algum": [
+   "6 meses",
+   "seis meses"
+  ],
+  "resposta_nao_contem": [
+   "5 dias úteis"
+  ]
+ },
+ {
+  "id": "B13",
+  "categoria": "do grupo",
+  "pergunta": "Meu filho nasceu há 40 dias. Ainda dá para incluir ele no plano de saúde sem carência?",
+  "esperado": {
+   "desfecho": "responder",
+   "fontes_obrigatorias": [
+    "beneficios-plano-de-saude"
+   ]
+  },
+  "resposta_contem_algum": [
+   "novembro"
+  ]
+ },
+ {
+  "id": "B23",
+  "categoria": "do grupo",
+  "pergunta": "Valeu pela ajuda, até mais!",
+  "esperado": {
+   "desfecho": "responder",
+   "fontes_obrigatorias": []
+  }
+ },
+ {
+  "id": "B22",
+  "categoria": "do grupo",
+  "pergunta": "Sou contratado como PJ. Tenho direito ao vale-refeição?",
+  "esperado": {
+   "desfecho": "escalar",
+   "fontes_obrigatorias": []
+  }
+ },
+ {
+  "id": "B18",
+  "categoria": "do grupo",
+  "pergunta": "Qual o horário do refeitório do escritório?",
+  "esperado": {
+   "desfecho": "nao_sei",
+   "fontes_obrigatorias": []
+  }
+ }
+]

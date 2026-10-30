@@ -12,3 +12,6 @@ jupyter
 
 # Encontro 5 · gráficos dos notebooks (o Colab já tem)
 matplotlib>=3.8
+
+# Observabilidade. Sem as chaves no .env o código segue e não envia traces.
+langfuse==5.0.4

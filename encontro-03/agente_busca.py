@@ -28,7 +28,7 @@ for _p in (RAIZ, RAIZ / "encontro-02"):
 
 import camada                                    # noqa: E402  (a camada do Encontro 2)
 import rag_aurora as r                           # noqa: E402
-from comum import medidor, modelo                # noqa: E402
+from comum import medidor, modelo, rastreio                # noqa: E402
 from comum.avaliar import avaliar as _avaliar_e1  # noqa: E402
 from comum.resultado import Resultado            # noqa: E402
 
@@ -146,10 +146,17 @@ SISTEMA_FIXO = REGRAS + "\n\n" + FORMATO_JSON
 
 def rodar_fixo(pergunta: str, registro: list) -> Resultado:
     """Busca fixa: o código busca sempre, coloca os trechos no prompt e o modelo responde uma vez."""
-    trechos = camada.executar(NOME, {"pergunta": pergunta}, CONTRATOS, registro)
-    mensagem = f"Documentos encontrados pela busca:\n{trechos}\n\nPergunta do colaborador: {pergunta}"
-    resposta = modelo.chamar([modelo.mensagem_do_usuario(mensagem)], sistema=SISTEMA_FIXO)
-    return Resultado.de_json(resposta.texto)
+    with rastreio.observacao(
+        "chain", "responder-com-busca-fixa", pergunta,
+        trace_name="responder-com-busca-fixa", tags=["workflow", "busca-fixa"],
+    ):
+        trechos = camada.executar(NOME, {"pergunta": pergunta}, CONTRATOS, registro)
+        mensagem = f"Documentos encontrados pela busca:\n{trechos}\n\nPergunta do colaborador: {pergunta}"
+        with rastreio.nome_geracao("redigir-resposta"):
+            resposta = modelo.chamar([modelo.mensagem_do_usuario(mensagem)], sistema=SISTEMA_FIXO)
+        resultado = Resultado.de_json(resposta.texto)
+        rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+        return resultado
 
 
 # ============================================================== medir

@@ -10,7 +10,7 @@ classificar a pergunta e redigir a resposta.
 
 Quem decide o próximo passo é o CÓDIGO, não o modelo.
 """
-from comum import modelo
+from comum import modelo, rastreio
 from comum.resultado import Resultado
 from ferramentas import buscar, formatar
 from politica_de_resposta import FORMATO_JSON, REGRAS
@@ -64,20 +64,40 @@ def classificar(pergunta: str) -> str:
 
 
 def resolver(pergunta: str) -> Resultado:
-    categoria = classificar(pergunta)
+    with rastreio.observacao(
+        "chain", "classificar-e-responder", pergunta,
+        trace_name="classificar-e-responder", tags=["workflow", "classificar"],
+    ):
+        with rastreio.nome_geracao("classificar-intencao"):
+            categoria = classificar(pergunta)
 
-    if categoria == "elegibilidade":
-        return Resultado(
-            "escalar",
-            [],
-            "Essa análise de elegibilidade é feita pelo RH. Vou encaminhar o seu caso.",
-        )
+        if categoria == "elegibilidade":
+            resultado = Resultado(
+                "escalar",
+                [],
+                "Essa análise de elegibilidade é feita pelo RH. Vou encaminhar o seu caso.",
+            )
+            rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+            return resultado
 
-    docs = buscar(categoria, pergunta)
-    if not docs:
-        return Resultado("nao_sei", [], "Não encontrei essa informação nos documentos deste tema.")
+        with rastreio.ferramenta(
+            "buscar-documentos", {"tema": categoria, "consulta": pergunta}, tipo="retriever",
+        ) as obs:
+            docs = buscar(categoria, pergunta)
+            if obs is not None:
+                obs.update(
+                    output=[{"id": d.id, "titulo": d.titulo, "tema": d.tema} for d in docs],
+                    metadata={"fonte": "corpus-local", "quantidade": len(docs)},
+                )
+        if not docs:
+            resultado = Resultado("nao_sei", [], "Não encontrei essa informação nos documentos deste tema.")
+            rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+            return resultado
 
-    documentos = "\n\n".join(formatar(doc) for doc in docs)
-    sistema = f"{REGRAS}\n\n{FORMATO_JSON}\n\nDocumentos disponíveis:\n\n{documentos}"
-    resposta = modelo.chamar([modelo.mensagem_do_usuario(pergunta)], sistema=sistema)
-    return Resultado.de_json(resposta.texto)
+        documentos = "\n\n".join(formatar(doc) for doc in docs)
+        sistema = f"{REGRAS}\n\n{FORMATO_JSON}\n\nDocumentos disponíveis:\n\n{documentos}"
+        with rastreio.nome_geracao("redigir-resposta"):
+            resposta = modelo.chamar([modelo.mensagem_do_usuario(pergunta)], sistema=sistema)
+        resultado = Resultado.de_json(resposta.texto)
+        rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+        return resultado

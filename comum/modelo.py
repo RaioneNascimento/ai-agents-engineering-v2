@@ -44,7 +44,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from comum import medidor
+from comum import medidor, rastreio
 
 PROVEDOR = os.getenv("PROVEDOR", "anthropic").strip().lower()
 MODELO = os.getenv("MODELO", "claude-haiku-4-5-20251001").strip()
@@ -85,35 +85,53 @@ def chamar(mensagens: list, sistema: str = "", ferramentas: list | None = None,
         raise ValueError("exigir_ferramenta precisa de ferramentas")
 
     chave = None
+    gravada = None
     if _replay["modo"]:
         chave = _chave(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta)
         gravada = _replay["respostas"].get(chave)
+        if gravada is None:
+            _replay["faltando"] += 1
+            if _replay["modo"] == "usar" and not tem_credencial():
+                raise RespostaNaoGravada(
+                    "Esta chamada não está na gravação, e não há chave de API configurada para fazê-la ao vivo.\n"
+                    "Isso acontece quando você muda algo que o modelo lê (um prompt, a descrição de um "
+                    "especialista, uma pergunta nova) ou escolhe uma opção fora do menu do notebook.\n"
+                    "Volte a configuração para uma das opções do menu, ou configure a chave (README do encontro).")
+
+    parametros = {"max_tokens": max_tokens}
+    if os.getenv("TEMPERATURA"):
+        parametros["temperature"] = float(os.environ["TEMPERATURA"])
+    # A entrada da generation é a conversa no formato de chat, não os argumentos da função
+    # (aí não entra chave de API nem configuração).
+    with rastreio.geracao(rastreio.nome_da_geracao(), MODELO, _para_openai(mensagens, sistema), parametros) as gen:
         if gravada is not None:
             _replay["reproduzidas"] += 1
             uso = gravada["uso"]
             medidor.registrar(uso["entrada"], uso["saida"], uso["segundos"])
-            return _resposta_de_dict(gravada["resposta"])
-        _replay["faltando"] += 1
-        if _replay["modo"] == "usar" and not tem_credencial():
-            raise RespostaNaoGravada(
-                "Esta chamada não está na gravação, e não há chave de API configurada para fazê-la ao vivo.\n"
-                "Isso acontece quando você muda algo que o modelo lê (um prompt, a descrição de um "
-                "especialista, uma pergunta nova) ou escolhe uma opção fora do menu do notebook.\n"
-                "Volte a configuração para uma das opções do menu, ou configure a chave (README do encontro).")
+            resposta = _resposta_de_dict(gravada["resposta"])
+            rastreio.completar_geracao(
+                gen, resposta=resposta,
+                uso={"input": uso["entrada"], "output": uso["saida"]},
+                origem="replay", modelo_nome=_replay["cabecalho"].get("modelo") or MODELO)
+            return resposta
 
-    antes = (medidor.atual().tokens_entrada, medidor.atual().tokens_saida, medidor.atual().segundos_no_modelo)
-    resposta = _chamar_provedor(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta)
+        antes = (medidor.atual().tokens_entrada, medidor.atual().tokens_saida, medidor.atual().segundos_no_modelo)
+        resposta, pensamento, uso = _chamar_provedor(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta)
+        rastreio.completar_geracao(
+            gen, resposta=resposta, uso=uso, pensamento=pensamento,
+            origem="simulado" if PROVEDOR == "fake" else "ao-vivo",
+            modelo_nome="fake" if PROVEDOR == "fake" else None)
 
-    if _replay["modo"] == "gravar":
-        depois = medidor.atual()
-        uso = {"entrada": depois.tokens_entrada - antes[0], "saida": depois.tokens_saida - antes[1],
-               "segundos": round(depois.segundos_no_modelo - antes[2], 3)}
-        registro = {"chave": chave, "resposta": _resposta_para_dict(resposta), "uso": uso}
-        _replay["respostas"][chave] = registro
-        with open(_replay["arquivo"], "a", encoding="utf-8") as f:
-            f.write(json.dumps(registro, ensure_ascii=False) + "\n")
-        _replay["gravadas"] += 1
-    return resposta
+        if _replay["modo"] == "gravar":
+            depois = medidor.atual()
+            uso_gravado = {"entrada": depois.tokens_entrada - antes[0], "saida": depois.tokens_saida - antes[1],
+                           "segundos": round(depois.segundos_no_modelo - antes[2], 3)}
+            registro = {"chave": chave, "resposta": _resposta_para_dict(resposta), "uso": uso_gravado}
+            _replay["respostas"][chave] = registro
+            with open(_replay["arquivo"], "a", encoding="utf-8") as f:
+                f.write(json.dumps(registro, ensure_ascii=False) + "\n")
+            _replay["gravadas"] += 1
+        return resposta
 
 
 def mensagem_do_usuario(texto: str) -> dict:
@@ -144,7 +162,8 @@ def tem_credencial() -> bool:
     return PROVEDOR == "fake"
 
 
-def _chamar_provedor(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta) -> Resposta:
+def _chamar_provedor(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta):
+    """Devolve (resposta, pensamento, uso). `uso` separa cache e raciocínio de input/output."""
     if PROVEDOR == "anthropic":
         return _chamar_anthropic(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta)
     if PROVEDOR == "openai_compat":
@@ -247,7 +266,7 @@ def _resposta_de_dict(d: dict) -> Resposta:
 _cliente = None
 
 
-def _chamar_anthropic(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta=False) -> Resposta:
+def _chamar_anthropic(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta=False):
     global _cliente
     import anthropic
 
@@ -273,16 +292,25 @@ def _chamar_anthropic(mensagens, sistema, ferramentas, max_tokens, exigir_ferram
     r = _cliente.messages.create(**pedido)
     medidor.registrar(r.usage.input_tokens, r.usage.output_tokens, time.perf_counter() - inicio)
 
-    texto, chamadas, conteudo = [], [], []
+    texto, chamadas, conteudo, pensamento = [], [], [], []
     for bloco in r.content:
         if bloco.type == "text":
             texto.append(bloco.text)
             conteudo.append({"type": "text", "text": bloco.text})
+        elif bloco.type == "thinking":
+            trecho = getattr(bloco, "thinking", "") or ""
+            if trecho:
+                pensamento.append(trecho)
         elif bloco.type == "tool_use":
             chamadas.append(Chamada(bloco.id, bloco.name, dict(bloco.input)))
             conteudo.append({"type": "tool_use", "id": bloco.id, "name": bloco.name,
                              "input": dict(bloco.input)})
-    return Resposta("".join(texto), chamadas, conteudo)
+    uso = {"input": r.usage.input_tokens, "output": r.usage.output_tokens}
+    for campo in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+        valor = getattr(r.usage, campo, None)
+        if valor:
+            uso[campo] = int(valor)
+    return Resposta("".join(texto), chamadas, conteudo), "\n".join(pensamento), uso
 
 
 # ---------------------------------------------------------------- openai_compat
@@ -370,7 +398,7 @@ def _de_openai(dados: dict) -> Resposta:
     return Resposta(texto, chamadas, conteudo)
 
 
-def _chamar_openai_compat(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta=False) -> Resposta:
+def _chamar_openai_compat(mensagens, sistema, ferramentas, max_tokens, exigir_ferramenta=False):
     import urllib.error
     import urllib.request
 
@@ -405,9 +433,23 @@ def _chamar_openai_compat(mensagens, sistema, ferramentas, max_tokens, exigir_fe
         time.sleep(2 * 2 ** tentativa)
     else:
         raise erro
-    uso = dados.get("usage") or {}
-    medidor.registrar(uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0), time.perf_counter() - inicio)
-    return _de_openai(dados)
+    uso_api = dados.get("usage") or {}
+    medidor.registrar(uso_api.get("prompt_tokens", 0), uso_api.get("completion_tokens", 0), time.perf_counter() - inicio)
+    resposta = _de_openai(dados)
+    entrada = int(uso_api.get("prompt_tokens", 0))
+    saida = int(uso_api.get("completion_tokens", 0))
+    cache = int((uso_api.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    raciocinio = int((uso_api.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
+    uso = {"input": max(entrada - cache, 0), "output": max(saida - raciocinio, 0)}
+    if cache:
+        uso["cache_read_input_tokens"] = cache
+    if raciocinio:
+        uso["output_reasoning_tokens"] = raciocinio
+    msg = dados["choices"][0]["message"]
+    pensamento = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    if not isinstance(pensamento, str):
+        pensamento = json.dumps(pensamento, ensure_ascii=False)
+    return resposta, pensamento, uso
 
 
 # ---------------------------------------------------------------- fake
@@ -442,11 +484,13 @@ def _args_fake(ferramenta: dict, pergunta: str, ids: list) -> dict:
     return args
 
 
-def _chamar_fake(mensagens, sistema, ferramentas, exigir_ferramenta=False) -> Resposta:
+def _chamar_fake(mensagens, sistema, ferramentas, exigir_ferramenta=False):
     """Simula o modelo sem chamar API nenhuma. Não mede nada real: só testa o encanamento."""
     texto_total = _texto_plano(sistema, mensagens)
     ids = re.findall(r'id="([a-z0-9-]+)"', texto_total) + re.findall(r'"id": "([a-z0-9-]+)"', texto_total)
-    medidor.registrar(len(texto_total) // 4, 40, 0.01)
+    entrada, saida = len(texto_total) // 4, 40
+    medidor.registrar(entrada, saida, 0.01)
+    uso = {"input": entrada, "output": saida}
 
     if ferramentas:
         por_nome = {f["nome"]: f for f in ferramentas}
@@ -466,10 +510,10 @@ def _chamar_fake(mensagens, sistema, ferramentas, exigir_ferramenta=False) -> Re
             alvo = next(iter(por_nome))
         chamada = Chamada(f"fake-{len(mensagens)}", alvo, _args_fake(por_nome[alvo], pergunta, ids))
         conteudo = [{"type": "tool_use", "id": chamada.id, "name": chamada.nome, "input": chamada.args}]
-        return Resposta("", [chamada], conteudo)
+        return Resposta("", [chamada], conteudo), "", uso
 
     if not ids:  # sem documentos no contexto: provavelmente é o classificador
-        return Resposta("rh", [], [{"type": "text", "text": "rh"}])
+        return Resposta("rh", [], [{"type": "text", "text": "rh"}]), "", uso
 
     texto = '{"desfecho": "responder", "fontes": ["%s"], "resposta": "(resposta simulada)"}' % ids[0]
-    return Resposta(texto, [], [{"type": "text", "text": texto}])
+    return Resposta(texto, [], [{"type": "text", "text": texto}]), "", uso

@@ -40,7 +40,7 @@ for _p in (RAIZ, RAIZ / "encontro-02", PASTA):
 
 import busca                                       # noqa: E402  (a busca do Encontro 3, já indexada)
 import camada                                      # noqa: E402  (a camada do Encontro 2)
-from comum import medidor, modelo                  # noqa: E402
+from comum import medidor, modelo, rastreio          # noqa: E402
 from comum.avaliar import avaliar as _avaliar_e1   # noqa: E402
 from comum.resultado import Resultado              # noqa: E402
 
@@ -161,6 +161,19 @@ def loop_agente(nome: str, pergunta: str, sistema: str, contratos: dict, registr
     exigir_ferramenta=True: a cada passo o modelo PRECISA chamar uma ferramenta, então ele nunca
     responde em texto solto e o contrato de saída é garantido pela API, não por uma frase no prompt.
     """
+    papel = rastreio.slug(nome)
+    with rastreio.observacao(
+        "agent", f"atender-{papel}", pergunta,
+        trace_name="atender-colaborador", tags=["atendimento", papel], metadata={"agente": papel},
+    ):
+        with rastreio.nome_geracao("decidir-proximo-passo"):
+            resultado = _loop_agente(nome, pergunta, sistema, contratos, registro, trace, max_passos)
+        rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+        return resultado
+
+
+def _loop_agente(nome: str, pergunta: str, sistema: str, contratos: dict, registro: list, trace: list,
+                 max_passos: int) -> Resultado:
     ferramentas = camada.como_ferramentas(contratos) + ENCERRAMENTO
     mensagens = [modelo.mensagem_do_usuario(pergunta)]
     _evento(trace, nome, "recebeu", pergunta, sistema=sistema,
@@ -175,10 +188,13 @@ def loop_agente(nome: str, pergunta: str, sistema: str, contratos: dict, registr
             if chamada.nome == "responder":
                 r = Resultado.de_dict(chamada.args)
                 _evento(trace, nome, "encerrou", f"{r.desfecho} · fontes {r.fontes}", resposta=r.resposta)
+                rastreio.registrar_ferramenta("responder", chamada.args, rastreio.saida_de_resultado(r))
                 return r
             if chamada.nome == "escalar_para_rh":
                 _evento(trace, nome, "encerrou", "escalar", resposta=chamada.args.get("motivo", ""))
-                return Resultado("escalar", [], chamada.args.get("motivo", ""))
+                r = Resultado("escalar", [], chamada.args.get("motivo", ""))
+                rastreio.registrar_ferramenta("escalar-para-rh", chamada.args, rastreio.saida_de_resultado(r))
+                return r
             texto = camada.executar(chamada.nome, chamada.args, contratos, registro)
             ids = sorted({r["id"] for r in json.loads(texto).get("resultados", [])}) if texto.startswith("{") else []
             _evento(trace, nome, "ferramenta", f"{chamada.nome}({json.dumps(chamada.args, ensure_ascii=False)})",
@@ -350,8 +366,9 @@ def _ferramenta_encaminhar(times: dict) -> dict:
 def rotear_com_llm(pergunta: str, times: dict, trace: list) -> dict:
     lista = "\n".join(f"- {k}: {v['descricao']}" for k, v in times.items())
     ferramenta = _ferramenta_encaminhar(times)
-    resposta = _chamar(trace, "roteador", [modelo.mensagem_do_usuario(pergunta)], SISTEMA_ROTEADOR.format(lista=lista),
-                       [ferramenta], exigir="encaminhar", max_tokens=400)
+    with rastreio.nome_geracao("escolher-especialista"):
+        resposta = _chamar(trace, "roteador", [modelo.mensagem_do_usuario(pergunta)], SISTEMA_ROTEADOR.format(lista=lista),
+                           [ferramenta], exigir="encaminhar", max_tokens=400)
     args = resposta.chamadas[0].args if resposta.chamadas else {}
     destino = args.get("destino") if args.get("destino") in times else "geral"
     return {"destino": destino, "confianca": args.get("confianca", "baixa"), "motivo": args.get("motivo", ""),
@@ -377,27 +394,31 @@ def _sem_acento(texto: str) -> str:
 
 
 def rotear_com_regra(pergunta: str, times: dict, trace: list) -> dict:
-    texto = _sem_acento(pergunta)
-    pontos = {k: 0 for k in times}
-    achadas = []
-    for area, palavras in PALAVRAS.items():
-        destino = area if area in times else "rh"          # com 3 especialistas, financeiro é do rh
-        for p in palavras:
-            if p in texto:
-                pontos[destino] += 1
-                achadas.append(p)
-    ordem = sorted(pontos, key=lambda k: -pontos[k])
-    melhor, segundo = ordem[0], ordem[1]
-    if pontos[melhor] == 0:
-        destino, confianca = "geral", "baixa"
-    elif pontos[melhor] == pontos[segundo]:
-        destino, confianca = melhor, "baixa"
-    else:
-        destino, confianca = melhor, "alta"
-    _evento(trace, "roteador", "regra", f"palavras: {', '.join(achadas) or 'nenhuma'}",
-            tokens_entrada=0, tokens_saida=0)
-    return {"destino": destino, "confianca": confianca, "motivo": f"palavras: {achadas}",
-            "pergunta_para_especialista": pergunta}
+    with rastreio.observacao("span", "rotear-por-regra", pergunta) as obs:
+        texto = _sem_acento(pergunta)
+        pontos = {k: 0 for k in times}
+        achadas = []
+        for area, palavras in PALAVRAS.items():
+            destino = area if area in times else "rh"          # com 3 especialistas, financeiro é do rh
+            for p in palavras:
+                if p in texto:
+                    pontos[destino] += 1
+                    achadas.append(p)
+        ordem = sorted(pontos, key=lambda k: -pontos[k])
+        melhor, segundo = ordem[0], ordem[1]
+        if pontos[melhor] == 0:
+            destino, confianca = "geral", "baixa"
+        elif pontos[melhor] == pontos[segundo]:
+            destino, confianca = melhor, "baixa"
+        else:
+            destino, confianca = melhor, "alta"
+        _evento(trace, "roteador", "regra", f"palavras: {', '.join(achadas) or 'nenhuma'}",
+                tokens_entrada=0, tokens_saida=0)
+        decisao = {"destino": destino, "confianca": confianca, "motivo": f"palavras: {achadas}",
+                   "pergunta_para_especialista": pergunta}
+        if obs is not None:
+            obs.update(output={"destino": destino, "confianca": confianca, "motivo": decisao["motivo"]})
+        return decisao
 
 
 # ======================================================================= arquitetura 2: roteador + especialistas
@@ -422,15 +443,24 @@ def roteador_especialistas(roteador: str = "llm", equipe_n: int = 3, handoff: st
     rotear = rotear_com_llm if roteador == "llm" else rotear_com_regra
 
     def arquitetura(pergunta, registro, trace):
-        rota = rotear(pergunta, times, trace)
-        _evento(trace, "roteador", "rota", f"→ {rota['destino']} (confiança {rota['confianca']})",
-                motivo=rota["motivo"], destino=rota["destino"])
-        if rota["confianca"] == "baixa" and se_incerto == "agente_unico":
-            _evento(trace, "roteador", "handoff", "incerto: devolve ao agente único", texto=pergunta)
-            return unico(pergunta, registro, trace)
-        texto = pergunta if handoff == "pergunta_original" else rota["pergunta_para_especialista"]
-        _evento(trace, "roteador", "handoff", f"→ especialista {rota['destino']}", texto=texto)
-        return atendentes[rota["destino"]](texto, registro, trace)
+        tipo = "agent" if roteador == "llm" else "chain"
+        with rastreio.observacao(
+            tipo, "rotear-atendimento", pergunta,
+            trace_name="atender-colaborador", tags=["atendimento", "roteador"],
+            metadata={"roteador": roteador, "equipe": str(equipe_n)},
+        ):
+            rota = rotear(pergunta, times, trace)
+            _evento(trace, "roteador", "rota", f"→ {rota['destino']} (confiança {rota['confianca']})",
+                    motivo=rota["motivo"], destino=rota["destino"])
+            if rota["confianca"] == "baixa" and se_incerto == "agente_unico":
+                _evento(trace, "roteador", "handoff", "incerto: devolve ao agente único", texto=pergunta)
+                resultado = unico(pergunta, registro, trace)
+            else:
+                texto = pergunta if handoff == "pergunta_original" else rota["pergunta_para_especialista"]
+                _evento(trace, "roteador", "handoff", f"→ especialista {rota['destino']}", texto=texto)
+                resultado = atendentes[rota["destino"]](texto, registro, trace)
+            rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+            return resultado
 
     arquitetura.nome = (f"roteador {roteador} · {equipe_n} esp · "
                         f"{'original' if handoff == 'pergunta_original' else 'resumo'} · "
@@ -489,6 +519,17 @@ def supervisor(equipe_n: int = 3, max_passos: int = MAX_PASSOS, fragil: bool = F
     ferramentas = consultas + ENCERRAMENTO
 
     def arquitetura(pergunta, registro, trace):
+        with rastreio.observacao(
+            "agent", "coordenar-especialistas", pergunta,
+            trace_name="atender-colaborador", tags=["atendimento", "supervisor"],
+            metadata={"equipe": str(equipe_n)},
+        ):
+            with rastreio.nome_geracao("decidir-proximo-passo"):
+                resultado = _atender(pergunta, registro, trace)
+            rastreio.definir_saida(rastreio.saida_de_resultado(resultado))
+            return resultado
+
+    def _atender(pergunta, registro, trace):
         mensagens = [modelo.mensagem_do_usuario(pergunta)]
         _evento(trace, "supervisor", "recebeu", pergunta, sistema=sistema, ferramentas=[f["nome"] for f in ferramentas])
         for _ in range(max_passos):
@@ -498,16 +539,20 @@ def supervisor(equipe_n: int = 3, max_passos: int = MAX_PASSOS, fragil: bool = F
                 if chamada.nome == "responder":
                     r = Resultado.de_dict(chamada.args)
                     _evento(trace, "supervisor", "encerrou", f"{r.desfecho} · fontes {r.fontes}", resposta=r.resposta)
+                    rastreio.registrar_ferramenta("responder", chamada.args, rastreio.saida_de_resultado(r))
                     return r
                 if chamada.nome == "escalar_para_rh":
                     _evento(trace, "supervisor", "encerrou", "escalar", resposta=chamada.args.get("motivo", ""))
-                    return Resultado("escalar", [], chamada.args.get("motivo", ""))
+                    r = Resultado("escalar", [], chamada.args.get("motivo", ""))
+                    rastreio.registrar_ferramenta("escalar-para-rh", chamada.args, rastreio.saida_de_resultado(r))
+                    return r
                 nome = chamada.nome.removeprefix("consultar_")
                 if nome not in atendentes:
                     texto = json.dumps({"erro": "ferramenta_desconhecida", "aceitos": list(times)})
                 else:
                     texto_handoff = str(chamada.args.get("pergunta", pergunta))
                     _evento(trace, "supervisor", "handoff", f"→ especialista {nome}", texto=texto_handoff, destino=nome)
+                    # O especialista é um agent aninhado. Não há um tool irmão com o mesmo despacho.
                     r = atendentes[nome](texto_handoff, registro, trace)
                     texto = json.dumps({"desfecho": r.desfecho, "fontes": r.fontes, "resposta": r.resposta},
                                        ensure_ascii=False)
