@@ -1,7 +1,7 @@
 # Nota de avaliação · Encontro 5
 
-**Equipe:**
-**Integrantes:**
+**Equipe: **  
+**Integrantes: Nicole, Gustavo, Igor, Paulo, Raione, Italo e Matheus**  
 **Domínio:** caso Aurora
 
 > Uma página. As tabelas das seções 1, 2 e 4 saem prontas do Passo 6 do notebook 02. O que vale nota é o
